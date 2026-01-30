@@ -104,7 +104,6 @@ BEGIN
            MAX(CASE WHEN x=3 AND y=3 THEN val END)
       FROM ttt_cell WHERE game_id=p_game_id
 
-    -- Columns
     UNION ALL
     SELECT 4,
            MAX(CASE WHEN x=1 AND y=1 THEN val END),
