@@ -1,5 +1,5 @@
--- ============================================================
--- Tic-Tac-Toe in PostgreSQL (PL/pgSQL)
+
+-- Tic-Tac-Toe 
 -- Public API:
 --   1) NewGame()            -> starts a new game, returns board
 --   2) NextMove(x, y)       -> makes next move (auto X/O), returns board
@@ -10,9 +10,7 @@
 -- Behavior requirement:
 --   If game not over -> returns current board state
 --   If game over     -> displays result (RAISE NOTICE) and returns final board
--- ============================================================
-
--- Clean up (optional)
+-- 
 DROP FUNCTION IF EXISTS NextMove(INT, INT) CASCADE;
 DROP FUNCTION IF EXISTS NewGame() CASCADE;
 DROP FUNCTION IF EXISTS ttt_render_board(INT) CASCADE;
@@ -22,11 +20,6 @@ DROP TABLE IF EXISTS ttt_cell CASCADE;
 DROP TABLE IF EXISTS ttt_game CASCADE;
 DROP TABLE IF EXISTS ttt_session CASCADE;
 
--- ------------------------------------------------------------
--- Tables
--- ------------------------------------------------------------
-
--- One-row "session" table to remember the active game (simple single-user usage)
 CREATE TABLE ttt_session (
   id              BOOLEAN PRIMARY KEY DEFAULT TRUE,
   active_game_id  BIGINT NULL
@@ -35,15 +28,13 @@ CREATE TABLE ttt_session (
 INSERT INTO ttt_session(id, active_game_id) VALUES (TRUE, NULL)
 ON CONFLICT (id) DO NOTHING;
 
--- Game metadata
 CREATE TABLE ttt_game (
   game_id      BIGSERIAL PRIMARY KEY,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-  status       TEXT NOT NULL DEFAULT 'IN_PROGRESS', -- IN_PROGRESS | X_WON | O_WON | DRAW
-  next_player  CHAR(1) NOT NULL DEFAULT 'X'         -- whose turn next: 'X' or 'O'
+  status       TEXT NOT NULL DEFAULT 'IN_PROGRESS', 
+  next_player  CHAR(1) NOT NULL DEFAULT 'X'         
 );
 
--- Board cells: each cell is a separate row
 CREATE TABLE ttt_cell (
   game_id  BIGINT NOT NULL REFERENCES ttt_game(game_id) ON DELETE CASCADE,
   x        INT NOT NULL CHECK (x BETWEEN 1 AND 3),
@@ -53,10 +44,6 @@ CREATE TABLE ttt_cell (
 );
 
 CREATE INDEX ON ttt_cell(game_id);
-
--- ------------------------------------------------------------
--- Helper: render board as multi-line text
--- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION ttt_render_board(p_game_id BIGINT)
 RETURNS TEXT
 LANGUAGE plpgsql
@@ -90,10 +77,6 @@ BEGIN
 END;
 $$;
 
--- ------------------------------------------------------------
--- Helper: check game status after a move
--- Returns: IN_PROGRESS | X_WON | O_WON | DRAW
--- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION ttt_check_status(p_game_id BIGINT)
 RETURNS TEXT
 LANGUAGE plpgsql
@@ -102,9 +85,7 @@ DECLARE
   winner CHAR(1);
   filled_count INT;
 BEGIN
-  -- Winner detection: check 8 lines; if any line has same non-null symbol -> winner
   WITH lines AS (
-    -- Rows
     SELECT 1 AS line_id,
            MAX(CASE WHEN x=1 AND y=1 THEN val END) AS a,
            MAX(CASE WHEN x=2 AND y=1 THEN val END) AS b,
@@ -143,7 +124,6 @@ BEGIN
            MAX(CASE WHEN x=3 AND y=3 THEN val END)
       FROM ttt_cell WHERE game_id=p_game_id
 
-    -- Diagonals
     UNION ALL
     SELECT 7,
            MAX(CASE WHEN x=1 AND y=1 THEN val END),
@@ -182,9 +162,6 @@ BEGIN
 END;
 $$;
 
--- ------------------------------------------------------------
--- PUBLIC: NewGame()  -> start a new game
--- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION NewGame()
 RETURNS TEXT
 LANGUAGE plpgsql
@@ -196,22 +173,17 @@ BEGIN
   VALUES ('IN_PROGRESS', 'X')
   RETURNING game_id INTO gid;
 
-  -- Insert 9 empty cells
   INSERT INTO ttt_cell(game_id, x, y, val)
   SELECT gid, x, y, NULL::CHAR(1)
   FROM generate_series(1,3) AS x
   CROSS JOIN generate_series(1,3) AS y;
 
-  -- Mark as active
   UPDATE ttt_session SET active_game_id = gid WHERE id = TRUE;
 
   RETURN ttt_render_board(gid);
 END;
 $$;
 
--- ------------------------------------------------------------
--- PUBLIC: NextMove(x, y) -> auto-determines whether to place X or O
--- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION NextMove(p_x INT, p_y INT)
 RETURNS TEXT
 LANGUAGE plpgsql
@@ -243,55 +215,52 @@ BEGIN
     RAISE EXCEPTION 'Coordinates out of range. Use x,y in 1..3.';
   END IF;
 
-  -- Ensure target cell is empty
   IF EXISTS (
-    SELECT 1 FROM ttt_cell
+    SELECT 1
+    FROM ttt_cell
     WHERE game_id = gid AND x = p_x AND y = p_y AND val IS NOT NULL
   ) THEN
     RAISE EXCEPTION 'Cell (%, %) is already occupied.', p_x, p_y;
   END IF;
 
-  -- Place the symbol
   UPDATE ttt_cell
   SET val = player
   WHERE game_id = gid AND x = p_x AND y = p_y;
 
-  -- Check status
   new_status := ttt_check_status(gid);
 
+  UPDATE ttt_game
+  SET status = new_status,
+      next_player = CASE
+                      WHEN new_status = 'IN_PROGRESS'
+                        THEN CASE WHEN player = 'X' THEN 'O' ELSE 'X' END
+                      ELSE next_player
+                    END
+  WHERE game_id = gid;
+
+  out_board := ttt_render_board(gid);
+
   IF new_status = 'IN_PROGRESS' THEN
-    -- Toggle next player
-    UPDATE ttt_game
-    SET next_player = CASE WHEN player = 'X' THEN 'O' ELSE 'X' END
-    WHERE game_id = gid;
-
-    out_board := ttt_render_board(gid);
     RETURN out_board;
+  END IF;
+
+  IF new_status = 'X_WON' THEN
+    RAISE NOTICE 'Game Over: X wins!';
+    RETURN out_board || E'\n\nResult: X wins!';
+  ELSIF new_status = 'O_WON' THEN
+    RAISE NOTICE 'Game Over: O wins!';
+    RETURN out_board || E'\n\nResult: O wins!';
   ELSE
-    -- Persist final status
-    UPDATE ttt_game
-    SET status = new_status
-    WHERE game_id = gid;
-
-    out_board := ttt_render_board(gid);
-
-    -- "Display the result" per requirement
-    IF new_status = 'X_WON' THEN
-      RAISE NOTICE 'Game Over: X wins!';
-    ELSIF new_status = 'O_WON' THEN
-      RAISE NOTICE 'Game Over: O wins!';
-    ELSE
-      RAISE NOTICE 'Game Over: Draw.';
-    END IF;
-
-    RETURN out_board || E'\n\n' ||
-           CASE new_status
-             WHEN 'X_WON' THEN 'Result: X wins!'
-             WHEN 'O_WON' THEN 'Result: O wins!'
-             ELSE 'Result: Draw.'
-           END;
+    RAISE NOTICE 'Game Over: Draw.';
+    RETURN out_board || E'\n\nResult: Draw.';
   END IF;
 END;
 $$;
 
+--Check the game
 SELECT NewGame();
+Select NextMove(1,1);
+Select NextMove(2,1);
+Select NextMove(1,2);
+Select NextMove(2,2);
+Select NextMove(1,3);
